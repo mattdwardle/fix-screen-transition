@@ -75,28 +75,56 @@ func keyboardDisconnect(_ cfg: Config) {
     log("keyboard: disconnect -> \(r == kIOReturnSuccess ? "ok" : String(format: "0x%x", r))")
 }
 
-var keyboardConnecting = false
+/// Keeps paging the keyboard until it connects or `stop()` is called.
+///
+/// A Magic Keyboard only answers a Mac's connection request for a few seconds right
+/// after it's released by another Mac; the rest of the time requests just time out
+/// (~15 s each). So the Mac that wants it has to already be paging when the other
+/// lets go. Uses IOBluetooth's async open so the main run loop stays responsive.
+final class KeyboardPager: NSObject {
+    let kb: IOBluetoothDevice
+    private(set) var active = false
+    private var inFlight = false
+    private var onConnect: (() -> Void)?
 
-/// Connect the keyboard, retrying once a second. IOBluetooth must be driven from the
-/// main run loop (it hangs on other threads), so this schedules work rather than blocking.
-func keyboardConnect(_ cfg: Config, attempts: Int = 8, done: (() -> Void)? = nil) {
-    guard !keyboardConnecting else { return }
-    guard let kb = keyboard(cfg) else { log("keyboard: not found"); done?(); return }
-    keyboardConnecting = true
-    func attempt(_ i: Int) {
-        if kb.isConnected() || (kb.openConnection() == kIOReturnSuccess && kb.isConnected()) {
-            log("keyboard: connected (attempt \(i))")
-        } else if i < attempts {
-            // The other Mac may still be holding it for a moment; back off and retry.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { attempt(i + 1) }
-            return
-        } else {
-            log("keyboard: could not connect after \(attempts) attempts")
-        }
-        keyboardConnecting = false
-        done?()
+    init(_ kb: IOBluetoothDevice) { self.kb = kb }
+
+    func start(onConnect: (() -> Void)? = nil) {
+        self.onConnect = onConnect
+        guard !active else { return }
+        active = true
+        log("keyboard: paging")
+        page()
     }
-    DispatchQueue.main.async { attempt(1) }
+
+    func stop() {
+        guard active else { return }
+        active = false
+        log("keyboard: stopped paging")
+    }
+
+    private func page() {
+        guard active, !inFlight else { return }
+        if kb.isConnected() { return connected() }
+        inFlight = true
+        if kb.openConnection(self) != kIOReturnSuccess {
+            inFlight = false
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [self] in page() }
+        }
+    }
+
+    @objc func connectionComplete(_ device: IOBluetoothDevice!, status: IOReturn) {
+        inFlight = false
+        if kb.isConnected() { return connected() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [self] in page() }
+    }
+
+    private func connected() {
+        guard active else { return }
+        active = false
+        log("keyboard: connected")
+        onConnect?()
+    }
 }
 
 // MARK: - Mouse (Logitech HID++ 2.0 over BLE)
@@ -215,11 +243,15 @@ func externalDisplays(_ cfg: Config) -> [CGDirectDisplayID] {
 
 final class Watcher {
     let cfg: Config
+    let pager: KeyboardPager
     var present: Bool
     var pending: DispatchWorkItem?
+    var lastRelease = Date.distantPast
 
     init(cfg: Config) {
+        guard let kb = keyboard(cfg) else { fail("keyboard \(cfg.keyboardAddress) not found") }
         self.cfg = cfg
+        pager = KeyboardPager(kb)
         present = !externalDisplays(cfg).isEmpty
     }
 
@@ -230,19 +262,17 @@ final class Watcher {
             guard !flags.contains(.beginConfigurationFlag) else { return }
             Unmanaged<Watcher>.fromOpaque(ctx!).takeUnretainedValue().changed()
         }, ctx)
-        // Safety net: catch missed notifications, and make sure a Mac without the display
-        // never holds on to the keyboard or mouse. A Magic Keyboard won't accept a new
-        // host while connected elsewhere, so handover only works by the holder letting go.
+        if present { arrived() } else { left() }
+        // Safety net: catch missed display notifications, keep paging while the display
+        // is here, and occasionally re-release devices this Mac picked back up without it.
         Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [self] _ in
             reconcile()
-            guard !present else { return }
-            if let kb = keyboard(cfg), kb.isConnected() {
-                log("display not here but keyboard is -> releasing keyboard")
-                keyboardDisconnect(cfg)
-            }
-            if HIDPP(productID: cfg.mouseProductID) != nil {
-                log("display not here but mouse is -> sending mouse away")
-                mouseSwitch(cfg)
+            if present {
+                if !pager.kb.isConnected() { pager.start() }
+            } else if Date().timeIntervalSince(lastRelease) > 20,
+                      pager.kb.isConnected() || HIDPP(productID: cfg.mouseProductID) != nil {
+                log("display not here but keyboard or mouse is -> releasing again")
+                release()
             }
         }
         RunLoop.main.run()
@@ -264,16 +294,26 @@ final class Watcher {
     }
 
     func left() {
-        log("display left -> handing keyboard and mouse to the other Mac")
+        log("display not here -> handing keyboard and mouse to the other Mac")
+        pager.stop()
+        lastRelease = Date()
+        // Give the other Mac a moment to notice the display and start paging the keyboard,
+        // so it's listening during the short window after we let go.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [self] in
+            guard !present else { return }
+            release()
+        }
+    }
+
+    func release() {
+        lastRelease = Date()
         keyboardDisconnect(cfg)
         mouseSwitch(cfg)
     }
 
     func arrived() {
-        log("display arrived -> claiming keyboard")
-        // Usually the other Mac's release makes the keyboard come here by itself; this
-        // just speeds it up if the keyboard is free. Each failed attempt blocks ~15 s.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [cfg] in keyboardConnect(cfg, attempts: 2) }
+        log("display here -> claiming keyboard")
+        pager.start()
     }
 }
 
@@ -329,7 +369,11 @@ case "leave":
     mouseSwitch(cfg)
 
 case "arrive":
-    keyboardConnect(Config.load()) { exit(0) }
+    let cfg = Config.load()
+    guard let kb = keyboard(cfg) else { fail("keyboard not found") }
+    let pager = KeyboardPager(kb)
+    pager.start { exit(0) }
+    DispatchQueue.main.asyncAfter(deadline: .now() + 60) { log("keyboard: gave up after 60s"); exit(1) }
     RunLoop.main.run()
 
 default:

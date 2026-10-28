@@ -17,10 +17,12 @@ A small background helper runs on each Mac and watches for the external display 
 
 | Event | What this Mac does |
 |---|---|
-| Display **disappears** (you switched away) | Disconnects the Magic Keyboard over Bluetooth, so it reconnects to the other Mac. Tells the Logitech mouse to jump to the other Mac's Easy-Switch channel. |
-| Display **appears** (you switched here) | Connects the Magic Keyboard over Bluetooth, retrying for a few seconds while the other Mac lets go. |
+| Display **appears** (you switched here) | Starts calling ("paging") the Magic Keyboard over Bluetooth, and keeps calling until it connects. |
+| Display **disappears** (you switched away) | Waits 1.5 seconds, then disconnects the Magic Keyboard and tells the Logitech mouse to jump to the other Mac's Easy-Switch channel. |
 
-A Magic Keyboard won't accept a new Mac while it's connected to another, so the Mac with the display can't pull it over. The Mac **without** the display has to let go. As a safety net, every 3 seconds a Mac without the display releases the keyboard and sends the mouse away if it's still holding them. That also covers the case where the devices started on the wrong Mac.
+**Why the timing matters:** a Magic Keyboard only answers a Mac's connection request for a few seconds right after it's released by another Mac. The rest of the time it ignores requests and only reconnects to the Mac it was last on. So the Mac you switch to has to be calling the keyboard *before* the Mac you left lets go. The 1.5-second pause gives it time to start.
+
+As a safety net, the helper also handles devices that start on the wrong Mac. If a Mac without the display finds itself holding the keyboard or mouse, it releases them, at most once every 20 seconds.
 
 With the helper on both Macs, the switch's button moves the display, keyboard and mouse together.
 
@@ -88,7 +90,7 @@ This stops the helper and removes the binary, LaunchAgent and config.
 ## Limitations
 
 - **Touch ID** on the Magic Keyboard only works with the Mac it was last connected to by a cable that carries data. Over a video-only switch that never happens, so Touch ID will likely work on only one Mac. Typing works on both. This is an Apple restriction, not something software can work around.
-- **Switching takes about 1–3 seconds** while Bluetooth reconnects.
+- **Switching takes a few seconds** while the keyboard is released and reconnected.
 - **Only one external display is expected.** The helper reacts to any external display coming or going. If you use other monitors, set `"displayName"` in the config to part of the display's ID shown by `kvm-follow status` (for example, `"vendor-0610"` for Apple displays).
 - **The mouse is sent, never pulled.** A Logitech mouse can only be told to switch by the Mac it's currently connected to, so each Mac sends it away when the display leaves. If the helper isn't running on the Mac you're leaving, press the Easy-Switch button.
 - **A Mac without the display won't keep the keyboard or mouse.** If you take one MacBook away from the desk and want to use the same mouse with it, stop the helper there first: `launchctl bootout gui/$UID/com.kvm-follow` (it restarts at next login, or run `./install.sh` again).
