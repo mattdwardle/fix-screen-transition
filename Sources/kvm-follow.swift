@@ -75,55 +75,45 @@ func keyboardDisconnect(_ cfg: Config) {
     log("keyboard: disconnect -> \(r == kIOReturnSuccess ? "ok" : String(format: "0x%x", r))")
 }
 
-/// Keeps paging the keyboard until it connects or `stop()` is called.
+/// Page the keyboard back-to-back until it connects or `deadline` passes.
 ///
-/// A Magic Keyboard only answers a Mac's connection request for a few seconds right
-/// after it's released by another Mac; the rest of the time requests just time out
-/// (~15 s each). So the Mac that wants it has to already be paging when the other
-/// lets go. Uses IOBluetooth's async open so the main run loop stays responsive.
-final class KeyboardPager: NSObject {
+/// A Magic Keyboard only answers a Mac's connection request for a moment right after
+/// another Mac releases it; the rest of the time each request times out after ~15 s.
+/// So the Mac that wants it has to already be paging when the other lets go.
+/// This blocks, so the watcher runs it in a child process (`kvm-follow page`).
+/// IOBluetooth's async open stalled after one attempt inside the watcher.
+func pageKeyboard(_ cfg: Config, until deadline: Date = .distantFuture) -> Bool {
+    guard let kb = keyboard(cfg) else { log("keyboard: not found"); return false }
+    log("keyboard: paging")
+    while Date() < deadline {
+        if kb.isConnected() { log("keyboard: connected"); return true }
+        _ = kb.openConnection()
+        Thread.sleep(forTimeInterval: 0.2)
+    }
+    log("keyboard: gave up paging")
+    return false
+}
+
+/// Runs `kvm-follow page` in the background while the display is here.
+final class KeyboardPager {
     let kb: IOBluetoothDevice
-    private(set) var active = false
-    private var inFlight = false
-    private var onConnect: (() -> Void)?
+    private var child: Process?
 
     init(_ kb: IOBluetoothDevice) { self.kb = kb }
 
-    func start(onConnect: (() -> Void)? = nil) {
-        self.onConnect = onConnect
-        guard !active else { return }
-        active = true
-        log("keyboard: paging")
-        page()
+    func start() {
+        guard child?.isRunning != true, !kb.isConnected() else { return }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
+        p.arguments = ["page"]
+        do { try p.run(); child = p } catch { log("keyboard: couldn't start pager: \(error)") }
     }
 
     func stop() {
-        guard active else { return }
-        active = false
+        guard let p = child, p.isRunning else { return }
+        p.terminate()
+        child = nil
         log("keyboard: stopped paging")
-    }
-
-    private func page() {
-        guard active, !inFlight else { return }
-        if kb.isConnected() { return connected() }
-        inFlight = true
-        if kb.openConnection(self) != kIOReturnSuccess {
-            inFlight = false
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [self] in page() }
-        }
-    }
-
-    @objc func connectionComplete(_ device: IOBluetoothDevice!, status: IOReturn) {
-        inFlight = false
-        if kb.isConnected() { return connected() }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [self] in page() }
-    }
-
-    private func connected() {
-        guard active else { return }
-        active = false
-        log("keyboard: connected")
-        onConnect?()
     }
 }
 
@@ -137,6 +127,7 @@ let hidppDevice: UInt8 = 0xFF
 let softwareID: UInt8 = 0x0A
 
 final class HIDPP {
+    static var warnedOpen = false
     let device: IOHIDDevice
     private var inbox: [[UInt8]] = []
     private let buf = UnsafeMutablePointer<UInt8>.allocate(capacity: 64)
@@ -153,7 +144,14 @@ final class HIDPP {
             return nil
         }
         device = dev
-        guard IOHIDDeviceOpen(device, IOOptionBits(kIOHIDOptionsTypeNone)) == kIOReturnSuccess else {
+        let r = IOHIDDeviceOpen(device, IOOptionBits(kIOHIDOptionsTypeNone))
+        guard r == kIOReturnSuccess else {
+            // kIOReturnNotPermitted means Input Monitoring hasn't been granted.
+            if !HIDPP.warnedOpen {
+                HIDPP.warnedOpen = true
+                log(String(format: "mouse: found but can't open it (0x%x)%@", r,
+                           r == kIOReturnNotPermitted ? " - allow kvm-follow under Input Monitoring" : ""))
+            }
             return nil
         }
         let ctx = Unmanaged.passUnretained(self).toOpaque()
@@ -257,6 +255,11 @@ final class Watcher {
 
     func start() {
         log("watching; external display \(present ? "present" : "absent")")
+        // Talking to the mouse needs Input Monitoring; this shows the prompt the first time.
+        if IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) != kIOHIDAccessTypeGranted {
+            log("mouse: Input Monitoring not granted yet - requesting it")
+            IOHIDRequestAccess(kIOHIDRequestTypeListenEvent)
+        }
         let ctx = Unmanaged.passUnretained(self).toOpaque()
         CGDisplayRegisterReconfigurationCallback({ _, flags, ctx in
             guard !flags.contains(.beginConfigurationFlag) else { return }
@@ -264,16 +267,24 @@ final class Watcher {
         }, ctx)
         if present { arrived() } else { left() }
         // Safety net: catch missed display notifications, keep paging while the display
-        // is here, and occasionally re-release devices this Mac picked back up without it.
+        // is here, and occasionally re-release a keyboard this Mac picked back up without it.
         Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [self] _ in
             reconcile()
             if present {
-                if !pager.kb.isConnected() { pager.start() }
-            } else if Date().timeIntervalSince(lastRelease) > 20,
-                      pager.kb.isConnected() || HIDPP(productID: cfg.mouseProductID) != nil {
-                log("display not here but keyboard or mouse is -> releasing again")
-                release()
+                pager.start()
+            } else if Date().timeIntervalSince(lastRelease) > 20, pager.kb.isConnected() {
+                log("display not here but keyboard is -> releasing again")
+                lastRelease = Date()
+                keyboardDisconnect(cfg)
             }
+        }
+        // The mouse drops off Bluetooth when it sleeps, so it may not be here at the moment
+        // the display leaves. Send it away as soon as it wakes up on a Mac without the display.
+        Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [self] _ in
+            guard !present, Date().timeIntervalSince(lastRelease) > 1.5,
+                  HIDPP(productID: cfg.mouseProductID) != nil else { return }
+            log("display not here but mouse is -> sending mouse away")
+            mouseSwitch(cfg)
         }
         RunLoop.main.run()
     }
@@ -369,12 +380,10 @@ case "leave":
     mouseSwitch(cfg)
 
 case "arrive":
-    let cfg = Config.load()
-    guard let kb = keyboard(cfg) else { fail("keyboard not found") }
-    let pager = KeyboardPager(kb)
-    pager.start { exit(0) }
-    DispatchQueue.main.asyncAfter(deadline: .now() + 60) { log("keyboard: gave up after 60s"); exit(1) }
-    RunLoop.main.run()
+    exit(pageKeyboard(Config.load(), until: Date().addingTimeInterval(60)) ? 0 : 1)
+
+case "page":
+    exit(pageKeyboard(Config.load()) ? 0 : 1)
 
 default:
     usage()

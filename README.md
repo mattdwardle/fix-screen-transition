@@ -22,7 +22,9 @@ A small background helper runs on each Mac and watches for the external display 
 
 **Why the timing matters:** a Magic Keyboard only answers a Mac's connection request for a few seconds right after it's released by another Mac. The rest of the time it ignores requests and only reconnects to the Mac it was last on. So the Mac you switch to has to be calling the keyboard *before* the Mac you left lets go. The 1.5-second pause gives it time to start.
 
-As a safety net, the helper also handles devices that start on the wrong Mac. If a Mac without the display finds itself holding the keyboard or mouse, it releases them, at most once every 20 seconds.
+**The mouse sleeps.** The MX Anywhere drops off Bluetooth after a few seconds without movement, so it may not be there to receive the switch command when the display leaves. A Mac without the display therefore checks every second and sends the mouse away as soon as it wakes up. At worst, you nudge the mouse after switching and it moves over within a second.
+
+As a safety net, if a Mac without the display finds itself holding the keyboard, it releases it again, at most once every 20 seconds.
 
 With the helper on both Macs, the switch's button moves the display, keyboard and mouse together.
 
@@ -34,6 +36,7 @@ It's a single Swift file with no dependencies. It uses macOS's own `IOBluetooth`
 - A Magic Keyboard (any model, including Touch ID) **paired over Bluetooth with both Macs**.
 - A Logitech mouse with Easy-Switch that supports HID++ `CHANGE_HOST`, connected over Bluetooth to both Macs. Tested with an **MX Anywhere 3S**. For other models, see [Using a different mouse](#using-a-different-mouse).
 - Each Mac on its own Easy-Switch channel.
+- **The keyboard not plugged into the display.** Pressing the switch briefly cuts the display's USB power, which knocks a plugged-in keyboard off Bluetooth before the helper can hand it over, and it can end up on neither Mac. Run it on battery (a charge lasts about a month) and charge it from somewhere else.
 
 ## Install
 
@@ -51,6 +54,13 @@ Do this on **both** Macs.
    Example: if Mac A is channel 3 and Mac B is channel 2, run `./install.sh 2` on Mac A and `./install.sh 3` on Mac B.
 
 3. If macOS asks whether `kvm-follow` may use Bluetooth, click **Allow**.
+4. Give it **Input Monitoring** access, which it needs to talk to the mouse: **System Settings → Privacy & Security → Input Monitoring**, and turn on `kvm-follow`. If it isn't listed, click **+**, press **⌘⇧G**, enter `~/.local/bin/kvm-follow` and add it. Then restart the helper:
+
+   ```sh
+   launchctl kickstart -k gui/$UID/com.kvm-follow
+   ```
+
+   Re-running `./install.sh` rebuilds the tool, and macOS may then ask for this permission again.
 
 The installer:
 - compiles the tool to `~/.local/bin/kvm-follow`
@@ -74,9 +84,9 @@ Logs go to `~/Library/Logs/kvm-follow.log`:
 
 ```
 [2026-10-28T06:44:18Z] watching; external display present
-[2026-10-28T06:51:02Z] display left -> handing keyboard and mouse to the other Mac
-[2026-10-28T06:51:02Z] keyboard: disconnect -> ok
-[2026-10-28T06:51:03Z] mouse: switch to channel 2 -> sent
+[2026-10-28T06:51:02Z] display not here -> handing keyboard and mouse to the other Mac
+[2026-10-28T06:51:04Z] keyboard: disconnect -> ok
+[2026-10-28T06:51:04Z] mouse: switch to channel 2 -> sent
 ```
 
 ## Uninstall
