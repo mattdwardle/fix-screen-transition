@@ -20,6 +20,8 @@ A small background helper runs on each Mac and watches for the external display 
 | Display **disappears** (you switched away) | Disconnects the Magic Keyboard over Bluetooth, so it reconnects to the other Mac. Tells the Logitech mouse to jump to the other Mac's Easy-Switch channel. |
 | Display **appears** (you switched here) | Connects the Magic Keyboard over Bluetooth, retrying for a few seconds while the other Mac lets go. |
 
+A Magic Keyboard won't accept a new Mac while it's connected to another, so the Mac with the display can't pull it over. The Mac **without** the display has to let go. As a safety net, every 3 seconds a Mac without the display releases the keyboard and sends the mouse away if it's still holding them. That also covers the case where the devices started on the wrong Mac.
+
 With the helper on both Macs, the switch's button moves the display, keyboard and mouse together.
 
 It's a single Swift file with no dependencies. It uses macOS's own `IOBluetooth` for the keyboard, `IOKit` HID for the mouse (Logitech HID++ 2.0 `CHANGE_HOST`, feature `0x1814`) and `CoreGraphics` display notifications.
@@ -89,6 +91,7 @@ This stops the helper and removes the binary, LaunchAgent and config.
 - **Switching takes about 1–3 seconds** while Bluetooth reconnects.
 - **Only one external display is expected.** The helper reacts to any external display coming or going. If you use other monitors, set `"displayName"` in the config to part of the display's ID shown by `kvm-follow status` (for example, `"vendor-0610"` for Apple displays).
 - **The mouse is sent, never pulled.** A Logitech mouse can only be told to switch by the Mac it's currently connected to, so each Mac sends it away when the display leaves. If the helper isn't running on the Mac you're leaving, press the Easy-Switch button.
+- **A Mac without the display won't keep the keyboard or mouse.** If you take one MacBook away from the desk and want to use the same mouse with it, stop the helper there first: `launchctl bootout gui/$UID/com.kvm-follow` (it restarts at next login, or run `./install.sh` again).
 - **If the switch already carries USB data** to the display (some Thunderbolt switches do), you probably don't need this: the keyboard will work over its cable.
 
 ## Using a different mouse
