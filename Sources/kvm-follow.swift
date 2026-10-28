@@ -244,6 +244,21 @@ func externalDisplays(_ cfg: Config) -> [CGDirectDisplayID] {
 let handoverDelay: TimeInterval = 4
 /// How often a Mac without the display re-releases a keyboard that came back to it.
 let retryDelay: TimeInterval = 6
+/// How long the Mac losing the display keeps Bluetooth off after letting go. A released
+/// keyboard reconnects to the Mac it was just on if it can, so that Mac goes dark briefly.
+let bluetoothOffTime: TimeInterval = 15
+
+/// Turn this Mac's Bluetooth on or off. There's no public API for this; the private
+/// IOBluetooth function below is the one `blueutil` and System Settings rely on.
+func setBluetoothPower(_ on: Bool) {
+    typealias SetPower = @convention(c) (Int32) -> Void
+    guard let lib = dlopen("/System/Library/Frameworks/IOBluetooth.framework/IOBluetooth", RTLD_LAZY),
+          let sym = dlsym(lib, "IOBluetoothPreferenceSetControllerPowerState") else {
+        return log("bluetooth: can't control power on this macOS")
+    }
+    unsafeBitCast(sym, to: SetPower.self)(on ? 1 : 0)
+    log("bluetooth: \(on ? "on" : "off")")
+}
 
 final class Watcher {
     let cfg: Config
@@ -251,6 +266,7 @@ final class Watcher {
     var present: Bool
     var pending: DispatchWorkItem?
     var lastRelease = Date.distantPast
+    var bluetoothBackOn: DispatchWorkItem?
 
     init(cfg: Config) {
         guard let kb = keyboard(cfg) else { fail("keyboard \(cfg.keyboardAddress) not found") }
@@ -280,8 +296,7 @@ final class Watcher {
                 pager.start()
             } else if Date().timeIntervalSince(lastRelease) > retryDelay, pager.kb.isConnected() {
                 log("display not here but keyboard is -> releasing again")
-                lastRelease = Date()
-                keyboardDisconnect(cfg)
+                releaseKeyboard()
             }
         }
         // The mouse drops off Bluetooth when it sleeps, so it may not be here at the moment
@@ -323,13 +338,31 @@ final class Watcher {
     }
 
     func release() {
-        lastRelease = Date()
-        keyboardDisconnect(cfg)
+        // Mouse first: sending it away needs Bluetooth, which releaseKeyboard turns off.
         mouseSwitch(cfg)
+        releaseKeyboard()
+    }
+
+    /// Disconnect the keyboard and go dark for a moment so it can't come straight back here;
+    /// the only Mac it can then reach is the one paging it.
+    func releaseKeyboard() {
+        lastRelease = Date()
+        guard pager.kb.isConnected() else { return log("keyboard: already disconnected") }
+        keyboardDisconnect(cfg)
+        setBluetoothPower(false)
+        bluetoothBackOn?.cancel()
+        let work = DispatchWorkItem { setBluetoothPower(true) }
+        bluetoothBackOn = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + bluetoothOffTime, execute: work)
     }
 
     func arrived() {
         log("display here -> claiming keyboard")
+        if let work = bluetoothBackOn, !work.isCancelled {
+            work.cancel()
+            setBluetoothPower(true)
+        }
+        bluetoothBackOn = nil
         pager.start()
     }
 }
