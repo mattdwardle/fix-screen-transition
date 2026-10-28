@@ -24,6 +24,17 @@ echo "Building..."
 mkdir -p "${bin:h}"
 swiftc -O "$here/Sources/kvm-follow.swift" -o "$bin"
 
+# macOS ties the Input Monitoring permission to the exact binary unless it's signed with a
+# real identity. Sign with an Apple Development certificate if there is one, so the
+# permission survives updates.
+identity=$(security find-identity -v -p codesigning 2>/dev/null | awk -F'"' '/Apple Development/ {print $2; exit}')
+if [[ -n "$identity" ]]; then
+  codesign --force --sign "$identity" --identifier com.kvm-follow "$bin"
+  echo "Signed with: $identity"
+else
+  echo "No signing certificate found; you'll need to re-allow Input Monitoring after each update."
+fi
+
 "$bin" setup "$channel"
 
 mkdir -p "${plist:h}"

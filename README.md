@@ -18,13 +18,13 @@ A small background helper runs on each Mac and watches for the external display 
 | Event | What this Mac does |
 |---|---|
 | Display **appears** (you switched here) | Starts calling ("paging") the Magic Keyboard over Bluetooth, and keeps calling until it connects. |
-| Display **disappears** (you switched away) | Waits 4 seconds, then tells the Logitech mouse to jump to the other Mac's Easy-Switch channel, disconnects the Magic Keyboard, and turns its own Bluetooth off for 15 seconds. |
+| Display **disappears** (you switched away) | Waits 4 seconds, then tells the Logitech mouse to jump to the other Mac's Easy-Switch channel and **forgets** the Magic Keyboard (like "Forget This Device" in Bluetooth settings), so it moves to the other Mac. |
 
-**Why the timing matters:** a Magic Keyboard only answers a Mac's connection request for a few seconds right after it's released by another Mac. The rest of the time it ignores requests and only reconnects to the Mac it was last on. So the Mac you switch to has to be calling the keyboard *before* the Mac you left lets go. The 4-second pause gives it time to notice the display and start. A released keyboard also tries to reconnect to the Mac it was just on, and that Mac would accept, so the Mac you left turns its Bluetooth off briefly. The keyboard then has nowhere to go except the Mac calling it.
+**Why the timing matters:** a Magic Keyboard only answers a Mac's connection request for a few seconds right after it's released by another Mac. The rest of the time it ignores requests and only reconnects to the Mac it was last on. So the Mac you switch to has to be calling the keyboard *before* the Mac you left lets go. The 4-second pause gives it time to notice the display and start. A merely disconnected keyboard goes straight back to the Mac it was just on, so the Mac you leave forgets it instead. It then moves to the other Mac. Later, when the other Mac forgets it in turn, it reconnects to this Mac by itself, without re-pairing. (Tested with a Magic Keyboard with Touch ID; if yours doesn't come back on its own, re-pair it in Bluetooth settings.)
 
 **The mouse sleeps.** The MX Anywhere drops off Bluetooth after a few seconds without movement, so it may not be there to receive the switch command when the display leaves. A Mac without the display therefore checks every second and sends the mouse away as soon as it wakes up. At worst, you nudge the mouse after switching and it moves over within a second.
 
-As a safety net, if a Mac without the display finds itself holding the keyboard, it releases it again, every 6 seconds.
+As a safety net, if a Mac without the display finds itself holding the keyboard, it forgets it again, at most every 6 seconds.
 
 With the helper on both Macs, the switch's button moves the display, keyboard and mouse together.
 
@@ -60,7 +60,7 @@ Do this on **both** Macs.
    launchctl kickstart -k gui/$UID/com.kvm-follow
    ```
 
-   Re-running `./install.sh` rebuilds the tool, and macOS may then ask for this permission again.
+   If you have an Apple Development signing certificate (for example, from signing in to Xcode), the installer signs the tool with it, and the permission survives updates. Otherwise, re-running `./install.sh` rebuilds the tool and you'll need to allow it again: remove the old `kvm-follow` entry with **−**, then add it again.
 
 The installer:
 - compiles the tool to `~/.local/bin/kvm-follow`
@@ -101,7 +101,6 @@ This stops the helper and removes the binary, LaunchAgent and config.
 
 - **Touch ID** on the Magic Keyboard only works with the Mac it was last connected to by a cable that carries data. Over a video-only switch that never happens, so Touch ID will likely work on only one Mac. Typing works on both. This is an Apple restriction, not something software can work around.
 - **Switching takes a few seconds** while the keyboard is released and reconnected.
-- **The Mac you switch away from loses Bluetooth for about 15 seconds**, so AirPods or other Bluetooth devices connected to it drop briefly. If the keyboard keeps returning to it (for example, the other Mac is asleep), this repeats every ~20 seconds until the display comes back.
 - **Only one external display is expected.** The helper reacts to any external display coming or going. If you use other monitors, set `"displayName"` in the config to part of the display's ID shown by `kvm-follow status` (for example, `"vendor-0610"` for Apple displays).
 - **The mouse is sent, never pulled.** A Logitech mouse can only be told to switch by the Mac it's currently connected to, so each Mac sends it away when the display leaves. If the helper isn't running on the Mac you're leaving, press the Easy-Switch button.
 - **A Mac without the display won't keep the keyboard or mouse.** If you take one MacBook away from the desk and want to use the same mouse with it, stop the helper there first: `launchctl bootout gui/$UID/com.kvm-follow` (it restarts at next login, or run `./install.sh` again).

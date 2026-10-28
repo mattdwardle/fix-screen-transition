@@ -1,10 +1,10 @@
 // kvm-follow: make a Bluetooth Magic Keyboard and a Logitech mouse follow a
 // video-only USB-C switch between two Macs.
 //
-// When the external display disappears (you switched away), this Mac drops
-// the keyboard so it reconnects to the other Mac, and tells the mouse to jump
-// to the other Mac's Easy-Switch channel. When the display appears, this Mac
-// pulls the keyboard back over Bluetooth.
+// When the external display disappears (you switched away), this Mac tells the
+// mouse to jump to the other Mac's Easy-Switch channel and forgets the keyboard
+// so it moves to the other Mac. When the display appears, this Mac pages the
+// keyboard until it connects.
 
 import CoreGraphics
 import Foundation
@@ -73,6 +73,19 @@ func keyboardDisconnect(_ cfg: Config) {
     guard kb.isConnected() else { return log("keyboard: already disconnected") }
     let r = kb.closeConnection()
     log("keyboard: disconnect -> \(r == kIOReturnSuccess ? "ok" : String(format: "0x%x", r))")
+}
+
+/// Remove the keyboard's pairing from this Mac. There's no public API for this; `remove`
+/// is the private IOBluetoothDevice method behind "Forget This Device" (also used by blueutil).
+func keyboardForget(_ cfg: Config) {
+    guard let kb = keyboard(cfg) else { return log("keyboard: not found") }
+    let sel = NSSelectorFromString("remove")
+    guard kb.responds(to: sel) else {
+        log("keyboard: can't forget on this macOS, disconnecting instead")
+        return keyboardDisconnect(cfg)
+    }
+    kb.perform(sel)
+    log("keyboard: forgotten")
 }
 
 /// Page the keyboard back-to-back until it connects or `deadline` passes.
@@ -244,21 +257,6 @@ func externalDisplays(_ cfg: Config) -> [CGDirectDisplayID] {
 let handoverDelay: TimeInterval = 4
 /// How often a Mac without the display re-releases a keyboard that came back to it.
 let retryDelay: TimeInterval = 6
-/// How long the Mac losing the display keeps Bluetooth off after letting go. A released
-/// keyboard reconnects to the Mac it was just on if it can, so that Mac goes dark briefly.
-let bluetoothOffTime: TimeInterval = 15
-
-/// Turn this Mac's Bluetooth on or off. There's no public API for this; the private
-/// IOBluetooth function below is the one `blueutil` and System Settings rely on.
-func setBluetoothPower(_ on: Bool) {
-    typealias SetPower = @convention(c) (Int32) -> Void
-    guard let lib = dlopen("/System/Library/Frameworks/IOBluetooth.framework/IOBluetooth", RTLD_LAZY),
-          let sym = dlsym(lib, "IOBluetoothPreferenceSetControllerPowerState") else {
-        return log("bluetooth: can't control power on this macOS")
-    }
-    unsafeBitCast(sym, to: SetPower.self)(on ? 1 : 0)
-    log("bluetooth: \(on ? "on" : "off")")
-}
 
 final class Watcher {
     let cfg: Config
@@ -266,7 +264,6 @@ final class Watcher {
     var present: Bool
     var pending: DispatchWorkItem?
     var lastRelease = Date.distantPast
-    var bluetoothBackOn: DispatchWorkItem?
 
     init(cfg: Config) {
         guard let kb = keyboard(cfg) else { fail("keyboard \(cfg.keyboardAddress) not found") }
@@ -338,31 +335,22 @@ final class Watcher {
     }
 
     func release() {
-        // Mouse first: sending it away needs Bluetooth, which releaseKeyboard turns off.
         mouseSwitch(cfg)
         releaseKeyboard()
     }
 
-    /// Disconnect the keyboard and go dark for a moment so it can't come straight back here;
-    /// the only Mac it can then reach is the one paging it.
+    /// Forget the keyboard, the same as "Forget This Device" in Bluetooth settings.
+    /// A plain disconnect isn't enough: the keyboard reconnects to the Mac it was just on.
+    /// Once forgotten, it goes to the other Mac, and reconnects here by itself later when
+    /// the other Mac forgets it in turn.
     func releaseKeyboard() {
         lastRelease = Date()
         guard pager.kb.isConnected() else { return log("keyboard: already disconnected") }
-        keyboardDisconnect(cfg)
-        setBluetoothPower(false)
-        bluetoothBackOn?.cancel()
-        let work = DispatchWorkItem { setBluetoothPower(true) }
-        bluetoothBackOn = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + bluetoothOffTime, execute: work)
+        keyboardForget(cfg)
     }
 
     func arrived() {
         log("display here -> claiming keyboard")
-        if let work = bluetoothBackOn, !work.isCancelled {
-            work.cancel()
-            setBluetoothPower(true)
-        }
-        bluetoothBackOn = nil
         pager.start()
     }
 }
@@ -384,12 +372,17 @@ let args = Array(CommandLine.arguments.dropFirst())
 switch args.first {
 case "setup":
     guard args.count == 2, let ch = Int(args[1]), (1...3).contains(ch) else { usage() }
-    guard let kb = findMagicKeyboard(), let addr = kb.addressString else {
+    // The keyboard may currently be forgotten on this Mac (it's on the other one), so fall
+    // back to the address saved by an earlier setup.
+    let saved = (try? Data(contentsOf: Config.path)).flatMap { try? JSONDecoder().decode(Config.self, from: $0) }
+    guard let addr = findMagicKeyboard()?.addressString ?? saved?.keyboardAddress else {
         fail("Couldn't find a paired Bluetooth keyboard. Pair the Magic Keyboard with this Mac first.")
     }
-    let cfg = Config(keyboardAddress: addr, mouseProductID: 0xB037, otherMacMouseChannel: ch, displayName: nil)
+    var cfg = saved ?? Config(keyboardAddress: addr, mouseProductID: 0xB037, otherMacMouseChannel: ch, displayName: nil)
+    cfg.keyboardAddress = addr
+    cfg.otherMacMouseChannel = ch
     do { try cfg.save() } catch { fail("Couldn't write config: \(error)") }
-    print("Keyboard: \(kb.name ?? "?") (\(addr))")
+    print("Keyboard: \(keyboard(cfg)?.name ?? "?") (\(addr))")
     print("Other Mac's mouse channel: \(ch)")
     print("Wrote \(Config.path.path)")
 
