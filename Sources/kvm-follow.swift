@@ -239,6 +239,12 @@ func externalDisplays(_ cfg: Config) -> [CGDirectDisplayID] {
     }
 }
 
+/// How long the Mac losing the display waits before letting go. The other Mac notices
+/// the display ~1 s later and must already be paging when the keyboard is released.
+let handoverDelay: TimeInterval = 4
+/// How often a Mac without the display re-releases a keyboard that came back to it.
+let retryDelay: TimeInterval = 6
+
 final class Watcher {
     let cfg: Config
     let pager: KeyboardPager
@@ -267,12 +273,12 @@ final class Watcher {
         }, ctx)
         if present { arrived() } else { left() }
         // Safety net: catch missed display notifications, keep paging while the display
-        // is here, and occasionally re-release a keyboard this Mac picked back up without it.
+        // is here, and re-release a keyboard this Mac picked back up without it.
         Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [self] _ in
             reconcile()
             if present {
                 pager.start()
-            } else if Date().timeIntervalSince(lastRelease) > 20, pager.kb.isConnected() {
+            } else if Date().timeIntervalSince(lastRelease) > retryDelay, pager.kb.isConnected() {
                 log("display not here but keyboard is -> releasing again")
                 lastRelease = Date()
                 keyboardDisconnect(cfg)
@@ -281,7 +287,7 @@ final class Watcher {
         // The mouse drops off Bluetooth when it sleeps, so it may not be here at the moment
         // the display leaves. Send it away as soon as it wakes up on a Mac without the display.
         Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [self] _ in
-            guard !present, Date().timeIntervalSince(lastRelease) > 1.5,
+            guard !present, Date().timeIntervalSince(lastRelease) > handoverDelay,
                   HIDPP(productID: cfg.mouseProductID) != nil else { return }
             log("display not here but mouse is -> sending mouse away")
             mouseSwitch(cfg)
@@ -310,7 +316,7 @@ final class Watcher {
         lastRelease = Date()
         // Give the other Mac a moment to notice the display and start paging the keyboard,
         // so it's listening during the short window after we let go.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + handoverDelay) { [self] in
             guard !present else { return }
             release()
         }

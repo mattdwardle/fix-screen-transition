@@ -18,13 +18,13 @@ A small background helper runs on each Mac and watches for the external display 
 | Event | What this Mac does |
 |---|---|
 | Display **appears** (you switched here) | Starts calling ("paging") the Magic Keyboard over Bluetooth, and keeps calling until it connects. |
-| Display **disappears** (you switched away) | Waits 1.5 seconds, then disconnects the Magic Keyboard and tells the Logitech mouse to jump to the other Mac's Easy-Switch channel. |
+| Display **disappears** (you switched away) | Waits 4 seconds, then disconnects the Magic Keyboard and tells the Logitech mouse to jump to the other Mac's Easy-Switch channel. |
 
-**Why the timing matters:** a Magic Keyboard only answers a Mac's connection request for a few seconds right after it's released by another Mac. The rest of the time it ignores requests and only reconnects to the Mac it was last on. So the Mac you switch to has to be calling the keyboard *before* the Mac you left lets go. The 1.5-second pause gives it time to start.
+**Why the timing matters:** a Magic Keyboard only answers a Mac's connection request for a few seconds right after it's released by another Mac. The rest of the time it ignores requests and only reconnects to the Mac it was last on. So the Mac you switch to has to be calling the keyboard *before* the Mac you left lets go. The 4-second pause gives it time to notice the display and start.
 
 **The mouse sleeps.** The MX Anywhere drops off Bluetooth after a few seconds without movement, so it may not be there to receive the switch command when the display leaves. A Mac without the display therefore checks every second and sends the mouse away as soon as it wakes up. At worst, you nudge the mouse after switching and it moves over within a second.
 
-As a safety net, if a Mac without the display finds itself holding the keyboard, it releases it again, at most once every 20 seconds.
+As a safety net, if a Mac without the display finds itself holding the keyboard, it releases it again, every 6 seconds.
 
 With the helper on both Macs, the switch's button moves the display, keyboard and mouse together.
 
