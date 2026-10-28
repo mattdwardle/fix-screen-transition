@@ -142,6 +142,8 @@ let softwareID: UInt8 = 0x0A
 final class HIDPP {
     static var warnedOpen = false
     static var warnedPairs = false
+    /// Why the last init returned nil after finding the mouse (e.g. no Input Monitoring).
+    static var lastOpenError: IOReturn?
     let device: IOHIDDevice
     private var inbox: [[UInt8]] = []
     private let buf = UnsafeMutablePointer<UInt8>.allocate(capacity: 64)
@@ -152,6 +154,7 @@ final class HIDPP {
             kIOHIDVendorIDKey: logitechVendor,
             kIOHIDProductIDKey: productID,
         ] as CFDictionary)
+        HIDPP.lastOpenError = nil
         guard let set = IOHIDManagerCopyDevices(mgr) as? Set<IOHIDDevice>, !set.isEmpty else {
             return nil
         }
@@ -171,6 +174,7 @@ final class HIDPP {
         device = dev
         let r = IOHIDDeviceOpen(device, IOOptionBits(kIOHIDOptionsTypeNone))
         guard r == kIOReturnSuccess else {
+            HIDPP.lastOpenError = r
             // kIOReturnNotPermitted means Input Monitoring hasn't been granted.
             if !HIDPP.warnedOpen {
                 HIDPP.warnedOpen = true
@@ -240,8 +244,17 @@ final class HIDPP {
     }
 }
 
+/// Describes why HIDPP(productID:) returned nil.
+func mouseMissing() -> String {
+    switch HIDPP.lastOpenError {
+    case nil: return "not connected here"
+    case kIOReturnNotPermitted?: return "here but blocked - allow kvm-follow under Input Monitoring"
+    case let r?: return String(format: "here but can't open it (0x%x)", r)
+    }
+}
+
 func mouseSwitch(_ cfg: Config) {
-    guard let m = HIDPP(productID: cfg.mouseProductID) else { return log("mouse: not connected here") }
+    guard let m = HIDPP(productID: cfg.mouseProductID) else { return log("mouse: \(mouseMissing())") }
     let ok = m.setHost(cfg.otherMacMouseChannel - 1)
     log("mouse: switch to channel \(cfg.otherMacMouseChannel) -> \(ok ? "sent" : "failed")")
 }
@@ -287,7 +300,8 @@ final class Watcher {
     func start() {
         log("watching; external display \(present ? "present" : "absent")")
         // Talking to the mouse needs Input Monitoring; this shows the prompt the first time.
-        if IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) != kIOHIDAccessTypeGranted {
+        let hadAccess = IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) == kIOHIDAccessTypeGranted
+        if !hadAccess {
             log("mouse: Input Monitoring not granted yet - requesting it")
             IOHIDRequestAccess(kIOHIDRequestTypeListenEvent)
         }
@@ -300,6 +314,12 @@ final class Watcher {
         // Safety net: catch missed display notifications, keep paging while the display
         // is here, and re-release a keyboard this Mac picked back up without it.
         Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [self] _ in
+            // A running process doesn't pick up a new Input Monitoring grant, so exit and let
+            // launchd (KeepAlive) start a fresh copy that has it.
+            if !hadAccess, IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) == kIOHIDAccessTypeGranted {
+                log("mouse: Input Monitoring granted - restarting")
+                exit(0)
+            }
             reconcile()
             if present {
                 pager.start()
@@ -409,7 +429,7 @@ case "status":
             print("mouse     connected here, host info unavailable")
         }
     } else {
-        print("mouse     not connected here")
+        print("mouse     \(mouseMissing())")
     }
     let ext = externalDisplays(cfg)
     print("display   \(ext.isEmpty ? "no external display" : ext.map(displayName).joined(separator: ", "))")

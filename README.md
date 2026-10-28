@@ -54,7 +54,7 @@ Do this on **both** Macs.
    Example: if Mac A is channel 3 and Mac B is channel 2, run `./install.sh 2` on Mac A and `./install.sh 3` on Mac B.
 
 3. If macOS asks whether `kvm-follow` may use Bluetooth, click **Allow**.
-4. Give it **Input Monitoring** access, which it needs to talk to the mouse: **System Settings → Privacy & Security → Input Monitoring**, and turn on `kvm-follow`. If it isn't listed, click **+**, press **⌘⇧G**, enter `~/.local/bin/kvm-follow` and add it. Then restart the helper:
+4. Give it **Input Monitoring** access, which it needs to talk to the mouse: **System Settings → Privacy & Security → Input Monitoring**, and turn on `kvm-follow`. If it isn't listed, click **+**, press **⌘⇧G**, enter `~/.local/bin/kvm-follow` and add it. The helper restarts itself within a few seconds of being allowed. If `kvm-follow status` still says the mouse is blocked, restart it by hand:
 
    ```sh
    launchctl kickstart -k gui/$UID/com.kvm-follow
