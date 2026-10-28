@@ -141,6 +141,7 @@ let softwareID: UInt8 = 0x0A
 
 final class HIDPP {
     static var warnedOpen = false
+    static var warnedPairs = false
     let device: IOHIDDevice
     private var inbox: [[UInt8]] = []
     private let buf = UnsafeMutablePointer<UInt8>.allocate(capacity: 64)
@@ -150,11 +151,22 @@ final class HIDPP {
         IOHIDManagerSetDeviceMatching(mgr, [
             kIOHIDVendorIDKey: logitechVendor,
             kIOHIDProductIDKey: productID,
-            kIOHIDDeviceUsagePageKey: hidppUsagePage,
-            kIOHIDDeviceUsageKey: hidppUsage,
         ] as CFDictionary)
-        guard let set = IOHIDManagerCopyDevices(mgr) as? Set<IOHIDDevice>, let dev = set.first else {
+        guard let set = IOHIDManagerCopyDevices(mgr) as? Set<IOHIDDevice>, !set.isEmpty else {
             return nil
+        }
+        // Prefer the interface that lists the HID++ collection. Some macOS versions don't list
+        // it in DeviceUsagePairs, so fall back to any interface of the mouse; the HID++ report
+        // ID is still accepted there if the device declares it.
+        func hasHIDPP(_ d: IOHIDDevice) -> Bool {
+            let pairs = IOHIDDeviceGetProperty(d, kIOHIDDeviceUsagePairsKey as CFString) as? [[String: Int]] ?? []
+            return pairs.contains { $0[kIOHIDDeviceUsagePageKey] == hidppUsagePage && $0[kIOHIDDeviceUsageKey] == hidppUsage }
+        }
+        let dev = set.first(where: hasHIDPP) ?? set.first!
+        if !hasHIDPP(dev), !HIDPP.warnedPairs {
+            HIDPP.warnedPairs = true
+            let pairs = IOHIDDeviceGetProperty(dev, kIOHIDDeviceUsagePairsKey as CFString) ?? "none" as CFString
+            log("mouse: no HID++ collection listed, trying anyway (usage pairs: \(pairs))")
         }
         device = dev
         let r = IOHIDDeviceOpen(device, IOOptionBits(kIOHIDOptionsTypeNone))
