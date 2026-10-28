@@ -75,16 +75,28 @@ func keyboardDisconnect(_ cfg: Config) {
     log("keyboard: disconnect -> \(r == kIOReturnSuccess ? "ok" : String(format: "0x%x", r))")
 }
 
-func keyboardConnect(_ cfg: Config, attempts: Int = 8) {
-    guard let kb = keyboard(cfg) else { return log("keyboard: not found") }
-    for i in 1...attempts {
-        if kb.isConnected() { return log("keyboard: connected") }
-        let r = kb.openConnection()
-        if r == kIOReturnSuccess && kb.isConnected() { return log("keyboard: connected (attempt \(i))") }
-        // The other Mac may still be holding it for a moment; back off and retry.
-        Thread.sleep(forTimeInterval: 1.0)
+var keyboardConnecting = false
+
+/// Connect the keyboard, retrying once a second. IOBluetooth must be driven from the
+/// main run loop (it hangs on other threads), so this schedules work rather than blocking.
+func keyboardConnect(_ cfg: Config, attempts: Int = 8, done: (() -> Void)? = nil) {
+    guard !keyboardConnecting else { return }
+    guard let kb = keyboard(cfg) else { log("keyboard: not found"); done?(); return }
+    keyboardConnecting = true
+    func attempt(_ i: Int) {
+        if kb.isConnected() || (kb.openConnection() == kIOReturnSuccess && kb.isConnected()) {
+            log("keyboard: connected (attempt \(i))")
+        } else if i < attempts {
+            // The other Mac may still be holding it for a moment; back off and retry.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { attempt(i + 1) }
+            return
+        } else {
+            log("keyboard: could not connect after \(attempts) attempts")
+        }
+        keyboardConnecting = false
+        done?()
     }
-    log("keyboard: could not connect after \(attempts) attempts")
+    DispatchQueue.main.async { attempt(1) }
 }
 
 // MARK: - Mouse (Logitech HID++ 2.0 over BLE)
@@ -218,20 +230,37 @@ final class Watcher {
             guard !flags.contains(.beginConfigurationFlag) else { return }
             Unmanaged<Watcher>.fromOpaque(ctx!).takeUnretainedValue().changed()
         }, ctx)
+        // Safety net: catch missed notifications, and make sure a Mac without the display
+        // never holds on to the keyboard or mouse. A Magic Keyboard won't accept a new
+        // host while connected elsewhere, so handover only works by the holder letting go.
+        Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [self] _ in
+            reconcile()
+            guard !present else { return }
+            if let kb = keyboard(cfg), kb.isConnected() {
+                log("display not here but keyboard is -> releasing keyboard")
+                keyboardDisconnect(cfg)
+            }
+            if HIDPP(productID: cfg.mouseProductID) != nil {
+                log("display not here but mouse is -> sending mouse away")
+                mouseSwitch(cfg)
+            }
+        }
         RunLoop.main.run()
     }
 
     func changed() {
         // Reconfiguration fires in bursts; settle before acting.
         pending?.cancel()
-        let work = DispatchWorkItem { [self] in
-            let now = !externalDisplays(cfg).isEmpty
-            guard now != present else { return }
-            present = now
-            if now { arrived() } else { left() }
-        }
+        let work = DispatchWorkItem { [self] in reconcile() }
         pending = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
+    }
+
+    func reconcile() {
+        let now = !externalDisplays(cfg).isEmpty
+        guard now != present else { return }
+        present = now
+        if now { arrived() } else { left() }
     }
 
     func left() {
@@ -242,8 +271,9 @@ final class Watcher {
 
     func arrived() {
         log("display arrived -> claiming keyboard")
-        // Give the other Mac a moment to drop the keyboard first.
-        DispatchQueue.global().asyncAfter(deadline: .now() + 1.0) { [cfg] in keyboardConnect(cfg) }
+        // Usually the other Mac's release makes the keyboard come here by itself; this
+        // just speeds it up if the keyboard is free. Each failed attempt blocks ~15 s.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [cfg] in keyboardConnect(cfg, attempts: 2) }
     }
 }
 
@@ -299,7 +329,8 @@ case "leave":
     mouseSwitch(cfg)
 
 case "arrive":
-    keyboardConnect(Config.load())
+    keyboardConnect(Config.load()) { exit(0) }
+    RunLoop.main.run()
 
 default:
     usage()
